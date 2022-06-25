@@ -14,8 +14,8 @@ DHT dht(DHTPIN, DHTTYPE);
 #include <ArduinoOTA.h>
 
 // Replace with your network credentials
-const char* ssid = "YOUR_SSID";
-const char* password = "YOUR_PASSWORD";
+const char* ssid = "Duvair24Ghz";
+const char* password = "PASSWORD";
 
 const int ESP_BUILTIN_LED = 2;
 
