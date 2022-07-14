@@ -1,10 +1,17 @@
-int gpio13Led = 13;
-int gpio12Relay = 12;
+int LED_PIN = 2;
+int COOLING_RELAY_PIN = 14;
+int FAN_RELAY_PIN = 16;
 
-float offTemp = 5;
-float onTemp = 7;
+float offTemp = 12;
+float extraDegreesForFan = 0.4; // offtemp+extraDegreesForFan*2 should always be smaller than onTemp
+
+float onTemp = 14;
+boolean coolingOn = false;
+//assert(extraDegreesForFan > 0);
+//assert(offTemp < onTemp);
+//assert(offTemp + 2 * extraDegreesForFan < onTemp);
 #include "DHT.h"
-#define DHTPIN 14
+#define DHTPIN 5
 #define DHTTYPE DHT22
 
 DHT dht(DHTPIN, DHTTYPE);
@@ -12,14 +19,20 @@ DHT dht(DHTPIN, DHTTYPE);
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
-const char* ssid = "ko-lab-iot";
+// Replace with your network credentials
+const char* ssid = "Duvair24Ghz";
 const char* password = "PASSWORD";
 
+const int ESP_BUILTIN_LED = 2;
+
+
 void setup(void) {
-  pinMode(gpio13Led, OUTPUT);
-  pinMode(gpio12Relay, OUTPUT);
-  digitalWrite(gpio13Led, LOW);
-  digitalWrite(gpio12Relay, HIGH);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(COOLING_RELAY_PIN, OUTPUT);
+  pinMode(FAN_RELAY_PIN, OUTPUT);
+
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(FAN_RELAY_PIN, LOW);
   // preparing GPIOs
   Serial.begin(115200);
   Serial.println("Booting");
@@ -28,27 +41,31 @@ void setup(void) {
   dht.begin();
 
   delay(500);
-  digitalWrite(gpio13Led, HIGH);
+  digitalWrite(LED_PIN, HIGH);
   delay(500);
-  digitalWrite(gpio13Led, LOW);
+  digitalWrite(LED_PIN, LOW);
   delay(500);
-  digitalWrite(gpio13Led, HIGH);
+  digitalWrite(LED_PIN, HIGH);
   delay(500);
-  digitalWrite(gpio13Led, LOW);
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(FAN_RELAY_PIN, HIGH);
+
   if (WiFi.waitForConnectResult() != WL_CONNECTED) {
     Serial.println("Connection Failed! No OTA Possible...");
+    digitalWrite(LED_PIN, HIGH);
     delay(200);
-    digitalWrite(gpio13Led, HIGH);
+    digitalWrite(LED_PIN, LOW);
     delay(200);
-    digitalWrite(gpio13Led, LOW);
+    digitalWrite(LED_PIN, HIGH);
     delay(200);
-    digitalWrite(gpio13Led, HIGH);
+    digitalWrite(LED_PIN, LOW);
     delay(200);
-    digitalWrite(gpio13Led, HIGH);
+    digitalWrite(LED_PIN, HIGH);
     delay(200);
-    digitalWrite(gpio13Led, LOW);
+    digitalWrite(LED_PIN, LOW);
     delay(200);
-    digitalWrite(gpio13Led, HIGH);
+    digitalWrite(LED_PIN, HIGH);
+    digitalWrite(COOLING_RELAY_PIN, LOW);
     return;
   }
   ArduinoOTA.onStart([]() {
@@ -72,14 +89,15 @@ void setup(void) {
   Serial.println("Ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+
   delay(500);
-  digitalWrite(gpio13Led, HIGH);
+  digitalWrite(LED_PIN, HIGH);
   delay(500);
-  digitalWrite(gpio13Led, LOW);
+  digitalWrite(LED_PIN, LOW);
   delay(500);
-  digitalWrite(gpio13Led, HIGH);
+  digitalWrite(LED_PIN, HIGH);
   delay(500);
-  digitalWrite(gpio13Led, LOW);
+  digitalWrite(LED_PIN, LOW);
 }
 
 void loop(void) {
@@ -94,13 +112,34 @@ void loop(void) {
   Serial.println(onTemp);
   Serial.println("temp< offTemp ??");
   Serial.println(temp < offTemp);
+  if (isnan(temp)) {
+    digitalWrite(COOLING_RELAY_PIN, LOW);
+    delay(200);
+    digitalWrite(LED_PIN, HIGH);
+    delay(200);
+    digitalWrite(LED_PIN, LOW);
+  }
   if (temp < offTemp) {
     Serial.println("temp< offTemp: yes");
-    digitalWrite(gpio13Led, HIGH);
-    digitalWrite(gpio12Relay, LOW);
-  } else if (temp > onTemp) {
+    digitalWrite(LED_PIN, HIGH);
+    digitalWrite(COOLING_RELAY_PIN, LOW);
+    coolingOn = false;
+  }
+  else if (temp > onTemp) {
     Serial.println("temp > onTemp: yes");
-    digitalWrite(gpio13Led, LOW);
-    digitalWrite(gpio12Relay, HIGH);
+    digitalWrite(LED_PIN, LOW);
+    digitalWrite(COOLING_RELAY_PIN, HIGH);
+    coolingOn = true;
+    digitalWrite(FAN_RELAY_PIN, HIGH); // To Be extra sure
+  }
+  if (temp > onTemp - extraDegreesForFan) {
+    Serial.println("temp > onTemp-extraDegreesForFan: yes");
+    digitalWrite(FAN_RELAY_PIN, HIGH);
+    coolingOn = true;
+  } else  if (temp > offTemp + extraDegreesForFan) {
+    if (!coolingOn) {
+      Serial.println("temp > onTemp-extraDegreesForFan: yes");
+      digitalWrite(FAN_RELAY_PIN, LOW);
+    }
   }
 }
