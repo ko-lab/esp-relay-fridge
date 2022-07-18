@@ -1,0 +1,29 @@
+{
+	"folders": [
+		{
+			"path": "..\\..\\..\\..\\..\\..\\gitProjects\\fridger"
+		},
+		{
+			"name": "220715-194939-esp12e",
+			"path": ".."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"*.txt": "plaintext",
+			"array": "cpp",
+			"deque": "cpp",
+			"initializer_list": "cpp",
+			"list": "cpp",
+			"vector": "cpp",
+			"xhash": "cpp",
+			"xstring": "cpp",
+			"xtree": "cpp",
+			"xutility": "cpp",
+			"string": "cpp",
+			"unordered_map": "cpp",
+			"string_view": "cpp",
+			"ranges": "cpp"
+		}
+	}
+}
