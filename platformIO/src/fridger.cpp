@@ -8,6 +8,7 @@
 #include <map>
 #include <string>
 #include <iostream>
+#include <thermistor.h>
 using namespace std;
 
 #define DHTPIN 5
@@ -20,6 +21,7 @@ using namespace std;
 int BUILTIN_LED_PIN = 2;
 int COOLING_RELAY_PIN = 14;
 int FAN_RELAY_PIN = 16;
+int LIGHT_RELAY_PIN = 15; // TODO
 
 float wantedTemp = 8;
 float wantedTempRange = 3;
@@ -35,31 +37,33 @@ DHT dht(DHTPIN, DHTTYPE);
 // Create an ESP8266 WiFiClient class to connect to the MQTT server.
 WiFiClient wifiClient;
 PubSubClient client(wifiClient);
+Thermistor *thermistor;
 char msg[MSG_BUFFER_SIZE];
 
 // Replace with your network credentials
 const char *ssid = "ko-lab-iot";
 const char *password = "PASSWORD";
-const string feedPrefix = "feeds/fridge/";
-const string feedPrefix_legacy = "/feeds/fridge/";
-const string mqqt_debug_topic = feedPrefix + "debug";
+#define feedPrefix "feeds/fridge/"
+#define concat(first, second) first second
 
-const string mqtt_appliance_temp_topic = feedPrefix + "temp/appliance";
-const string mqtt_compressor_temp_topic = feedPrefix + "temp/compressor";
-const string mqtt_appliance_temp_topic_legacy = feedPrefix_legacy + "appliance_temp";
+#define feedPrefix_legacy "/feeds/fridge/"
+constexpr char *mqqt_debug_topic = concat(feedPrefix, "debug");
 
-const string mqtt_compressor_state_topic = feedPrefix + "state/compressor";
-const string mqtt_fan_state_topic = feedPrefix + "state/fan";
-const string mqtt_light_state_topic = feedPrefix + "state/light";
+constexpr char *mqtt_appliance_temp_topic = concat(feedPrefix, "temp/appliance");
+constexpr char *mqtt_compressor_temp_topic = concat(feedPrefix, "temp/compressor");
+constexpr char *mqtt_appliance_temp_topic_legacy = concat(feedPrefix_legacy, "appliance_temp");
 
-const string mqtt_toggle_compressor_topic = feedPrefix + "toggle/compressor";
-const string mqtt_toggle_fan_topic = feedPrefix + "toggle/fan";
-const string mqtt_toggle_light_topic = feedPrefix + "toggle/light";
+constexpr char *mqtt_compressor_state_topic = concat(feedPrefix, "state/compressor");
+constexpr char *mqtt_fan_state_topic = concat(feedPrefix, "state/fan");
+constexpr char *mqtt_light_state_topic = concat(feedPrefix, "state/light");
 
-const string mqtt_set_temp_topic = feedPrefix + "set/temp";
-const string mqtt_set_temp_range_topic = feedPrefix + "set/temp_range";
+constexpr char *mqtt_toggle_compressor_topic = concat(feedPrefix, "toggle/compressor");
+constexpr char *mqtt_toggle_fan_topic = concat(feedPrefix, "toggle/fan");
+constexpr char *mqtt_toggle_light_topic = concat(feedPrefix, "toggle/light");
 
-// map<char *, char *> states;
+constexpr char *mqtt_set_temp_topic = concat(feedPrefix, "set/temp");
+constexpr char *mqtt_set_temp_range_topic = concat(feedPrefix, "set/temp_range");
+
 // const int APPLIANCE_POWER_PIN = -1;           // TODO use 2 gpio pins for switching between different thermistor readings
 // const int[] ALL_PINS = [APPLIANCE_POWER_PIN]; // TODO use 2 gpio pins for switching between different thermistor readings
 float readApplianceTemp()
@@ -73,14 +77,64 @@ float readCompressorTemp()
   // TODO enable COMPRESSOR_POWER_PIN and disable other pins https://forum.arduino.cc/t/nodemcu-1-analog-pin-multiple-thermistors-reading-problem/593407/7
   return thermistor->readTempC();
 }
+unsigned int longNbDigits(long number)
+{
+  if (number < 0)
+    return 1 + longNbDigits(abs(number));
+  if (number < 10)
+    return 1;
+  return 1 + longNbDigits(number / 10);
+}
+boolean publish(const char *topic, float payload, boolean retained, unsigned int minlength, unsigned int precision)
+{
+  if (minlength < 4 && payload < 0)
+    minlength = 4; // 4 = sign + 1 integral digit + fractional point + 1 franctional digit
+  char mqtt_messagebuff[longNbDigits((long)payload) + 1 + precision + 1];
+
+  dtostrf(payload, minlength, precision, mqtt_messagebuff);
+  return client.publish(topic, (uint8_t *)mqtt_messagebuff, strlen(mqtt_messagebuff), retained);
+}
+
+boolean publish(const char *topic, long payload, boolean retained)
+{
+  char mqtt_messagebuff[longNbDigits(payload) + 1]; // number of digits including sign + null terminaison
+
+  itoa(payload, mqtt_messagebuff, 10);
+  return client.publish(topic, (uint8_t *)mqtt_messagebuff, strlen(mqtt_messagebuff), retained);
+}
+boolean publish(const char *topic, int payload, boolean retained)
+{
+  return publish(topic, (long)payload, retained);
+}
+void mqttPublishFloat(string topic, float value)
+{
+  publish(topic.c_str(), value, false, 3, 2);
+}
+
+// Bug workaround for Arduino 1.6.6, it seems to need a function declaration
+// for some reason (only affects ESP8266, likely an arduino-builder bug).
+void mqttReconnect();
+void setupGPIO();
+void mSetupSerial();
+void setupWifi();
+void setupOTA();
+void setupMQTT();
+void blink(int delayMillis, int times);
+
+void mqttDebugLog(const char *msg, const char *value);
+void mqttDebugLog(string msg);
+void setupThermistor();
 class FridgeState
 {
 public:
   float applianceTemp;
   float compressorTemp;
   float dht22Temp;
+  float wantedTemp = 8;
+  float wantedTempRange = 3;
   boolean compressorState = 0;
   boolean fanState = 0;
+  boolean lightState = 0;
   boolean coolingMode = 0;
   boolean killSwitchOn = 0;
   boolean forceFanOn = 0;
@@ -89,11 +143,22 @@ public:
   unsigned long lastCompressorStateChange;
   unsigned long lastLightStateChange;
   unsigned long lastFanStateChange;
+  boolean on()
+  {
+    return !this->killSwitchOn;
+  }
   void updateTemps()
   {
     this->applianceTemp = readApplianceTemp();
     this->compressorTemp = readCompressorTemp();
     this->dht22Temp = dht.readTemperature(false);
+  }
+  void publishState()
+  {
+    mqttPublishFloat(mqtt_appliance_temp_topic, this->applianceTemp);
+    mqttPublishFloat(mqtt_appliance_temp_topic_legacy, this->dht22Temp);
+    mqttPublishFloat(mqtt_compressor_temp_topic, this->compressorTemp);
+    // TODO publish other data
   }
   void toggleCompressor()
   {
@@ -111,25 +176,22 @@ public:
   {
     this->lastLightStateChange = millis();
     this->lightState = !this->lightState;
-    digitalWrite(FAN_RELAY_PIN, this->lightState);
+    digitalWrite(LIGHT_RELAY_PIN, this->lightState);
+    mqttDebugLog(((string) "light relay changed") + ((string)(this->lightState ? "0" : "1")));
+  }
+  void setTemp(float wantedTemp)
+  {
+    this->wantedTemp = wantedTemp;
+  }
+  void setTempRange(float wantedTempRange)
+  {
+    this->wantedTempRange = wantedTempRange;
   }
 };
+
+void handleMQTT(FridgeState *state);
+void handleAutoCooling(FridgeState *state);
 FridgeState fridgeState = FridgeState();
-
-// Bug workaround for Arduino 1.6.6, it seems to need a function declaration
-// for some reason (only affects ESP8266, likely an arduino-builder bug).
-void MQTT_connect();
-void setupGPIO();
-void mSetupSerial();
-void setupWifi();
-void setupOTA();
-void setupMQTT();
-void blink(int delayMillis, int times);
-void handleMQTT(float temp);
-void handleAutoCooling(float temp);
-unsigned long lastPublish = 0;
-void mqttDebuglog(char *msg);
-
 void setup(void)
 {
   setupGPIO();
@@ -137,23 +199,21 @@ void setup(void)
   setupWifi();
   setupMQTT();
   setupOTA();
+  setupThermistor();
   dht.begin();
-  mqttDebuglog("dht.begin done");
+  mqttDebugLog("dht.begin done");
   blink(400, 1);
 }
 
 void loop(void)
 {
   ArduinoOTA.handle();
-  float temp = dht.readTemperature(false);
-  handleMQTT(temp);
-  if (!fridgeState.on())
+  fridgeState.updateTemps();
+  handleMQTT(&fridgeState);
+  if (fridgeState.on())
   {
-    digitalWrite(COOLING_RELAY_PIN, LOW);
-    digitalWrite(FAN_RELAY_PIN, LOW);
-    return;
+    handleAutoCooling(&fridgeState);
   }
-  handleAutoCooling(temp);
 }
 
 void blink(int delayMillis, int times)
@@ -171,8 +231,9 @@ void disableCooling()
   digitalWrite(COOLING_RELAY_PIN, LOW);
 }
 
-void handleAutoCooling(FridgeState temp)
+void handleAutoCooling(FridgeState *state)
 {
+  float temp = state->dht22Temp;
   if (isnan(temp))
   {
     disableCooling();
@@ -205,39 +266,14 @@ void handleAutoCooling(FridgeState temp)
     }
   }
 }
-void handleMQTT(FridgeState state)
+void handleMQTT(FridgeState *state)
 {
-  // Ensure the connection to the MQTT server is alive (this will make the first
-  // connection and automatically reconnect when disconnected).  See the MQTT_connect
-  // function definition further below.
-  MQTT_connect();
-  String tempMsg = String(temp, 2);
-  // this is our 'wait for incoming subscription packets' busy subloop
-  // try to spend your time here
-
-  // Adafruit_MQTT_Subscribe *subscription;
-  // if ((subscription = mqtt.readSubscription(100)))
-  // {
-  //   if (subscription == &coolingOnOffButton)
-  //   {
-  //     COOLING_ON_STATE = !COOLING_ON_STATE;
-  //     digitalWrite(COOLING_RELAY_PIN, COOLING_ON_STATE ? HIGH : LOW);
-  //     cooling_state.publish(COOLING_ON_STATE ? "HIGH" : "LOW");
-  //   }
-  //   else if (subscription == &onoffbutton)
-  //   {
-  //     ON_STATE = !ON_STATE;
-  //     digitalWrite(BUILTIN_LED_PIN, ON_STATE ? HIGH : LOW);
-  //     fridge_state.publish(ON_STATE ? "HIGH" : "LOW");
-  //   }
-  // }
-
-  unsigned long nowTime = millis();
-  if (nowTime - lastPublish > 2000)
+  if (!client.connected())
   {
-    client.publish(mqtt_appliance_temp_topic, tempMsg.c_str());
-    lastPublish = millis();
+    mqttReconnect();
   }
+  client.loop();
+  state->publishState();
 }
 
 void mSetupSerial()
@@ -289,37 +325,58 @@ void setupOTA()
     else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
     else if (error == OTA_END_ERROR) Serial.println("End Failed"); });
   ArduinoOTA.begin();
-  mqttDebuglog("setupOTA done");
+  mqttDebugLog("setupOTA done");
 }
-void mqttCallback(char *topic, byte *payload, unsigned int length)
+
+void setupThermistor()
+{
+  float MAX_V_OVER_THERMISTOR = 1.65;
+  float MAX_IN_VOLTAGE = 1;
+  float MAX_RETURN_VAL = 1023;
+  int SERIES_RESISTANCE = 120 * 1000; // 100K in series with 20K:20K voltage divider
+  int REF_RESISTANCE = 25 * 1000;     // 25K measured when fridge was around 7 degrees
+  int REF_TEMP = 6;
+  int B_COEF = 3950;
+  int NB_SAMPLES_FOR_AVG = 1;
+  int SAMPLE_DELAY = 200;
+  // Circuit diagram: https://www.falstad.com/circuit/circuitjs.html?ctz=CQAgjCAMB0l3BWK0BMkDMkBskAskBOLLdXAdlwA50RiQkFJ6BTAWjDACgA3cHcXLhC50KAUKZN8IdNBqTkCTgCcZ6LCBSVKw0Zu1RN8SJ3SNNCDVp1h+1w2GMycSVmiaNJqXChzH-cEIAKswAtgAOzMoAhgAuAK7KzJwA7rpi9iJiYIJQKhZWBujq+jpMjsac4WqFOsUa6jaGJtW2TPZtzk2SqXztBp05EvmDufWlhu5wVQUTKJZd4M2cQA
+  thermistor = new Thermistor(A0, MAX_V_OVER_THERMISTOR, MAX_IN_VOLTAGE, MAX_RETURN_VAL, SERIES_RESISTANCE, REF_RESISTANCE, REF_TEMP, B_COEF, NB_SAMPLES_FOR_AVG, SAMPLE_DELAY);
+}
+constexpr unsigned int mhash(const char *s, int off = 0)
+{
+  return !s[off] ? 5381 : (mhash(s, off + 1) * 33) ^ s[off];
+}
+
+void mqttCallback(char *topic, unsigned char *payload, unsigned int length)
 {
   string debugMsg("received: ");
   debugMsg.append(topic);
   debugMsg.append(": ");
-  for (int i = 0; i < length; i++)
+  for (unsigned int i = 0; i < length; i++)
   {
-    debugMsg.append((char)payload[i]);
+    debugMsg.append((const char *)payload[i]);
   }
-  mqttDebuglog(debugMsg.c_str());
-  switch (topic)
+  string payloadString = (char *)payload;
+  mqttDebugLog(debugMsg);
+  switch (mhash(topic))
   {
-  case mqtt_toggle_compressor_topic:
+  case mhash(mqtt_toggle_compressor_topic):
     fridgeState.toggleCompressor();
     break;
-  case mqtt_toggle_fan_topic:
+  case mhash(mqtt_toggle_fan_topic):
     fridgeState.toggleFan();
     break;
-  case mqtt_toggle_light_topic:
+  case mhash(mqtt_toggle_light_topic):
     fridgeState.toggleLight();
     break;
-  case mqtt_set_temp_range_topic:
-    fridgeState.setTemp();
+  case mhash(mqtt_set_temp_range_topic):
+    fridgeState.setTempRange(stof(payloadString));
     break;
-  case mqtt_set_temp_topic;:
-    fridgeState.setTempRange();
+  case mhash(mqtt_set_temp_topic):
+    fridgeState.setTemp(stof(payloadString));
     break;
   default:
-    mqttDebuglog("Last MQTT Topic not recognized");
+    mqttDebugLog("Last MQTT Topic not recognized");
   }
 }
 
@@ -327,17 +384,17 @@ void setupMQTT()
 {
   client.setServer(MQTT_SERVER, MQTT_SERVERPORT);
   client.setCallback(mqttCallback);
-  MQTT_connect();
-  mqttDebuglog("MQTT connect Done");
-  string debugMsg("IP address: ");
-  debugMsg.append(WiFi.localIP());
-  mqttDebuglog(debugMsg);
+  mqttReconnect();
+  mqttDebugLog("MQTT connect Done");
+  const char *topic = "IP ADDR:";
+  mqttDebugLog(topic, WiFi.localIP().toString().c_str());
 }
 
-void reconnect()
+void mqttReconnect()
 {
-  // Loop until we're reconnected
-  while (!client.connected())
+  // Loop until we're reconnected (max 3 tries)
+  int tries = 0;
+  while (!client.connected() && tries++ < 3)
   {
     Serial.print("Attempting MQTT connection...");
     // Create a random client ID
@@ -346,7 +403,7 @@ void reconnect()
     if (client.connect(clientId.c_str()))
     {
       // Once connected, publish an announcement...
-      mqttDebuglog("connected");
+      mqttDebugLog("connected");
       // ... and resubscribe
       client.subscribe(mqtt_toggle_compressor_topic);
       client.subscribe(mqtt_toggle_fan_topic);
@@ -358,46 +415,21 @@ void reconnect()
     {
       Serial.print("failed, rc=");
       Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
+      Serial.println("try again in 500 millis");
       // Wait 5 seconds before retrying
       delay(500);
     }
   }
 }
-
-// Function to connect and reconnect as necessary to the MQTT server.
-// Should be called in the loop function and it will take care if connecting.
-void MQTT_connect()
+void mqttDebugLog(const char *msg, const char *value = "")
 {
-  reconnect();
-  // int8_t ret;
-
-  // // Stop if already connected.
-  // if (mqtt.connected())
-  // {
-  //   return;
-  // }
-
-  // Serial.print("Connecting to MQTT... ");
-
-  // uint8_t retries = 3;
-  // while ((ret = mqtt.connect()) != 0)
-  // { // connect will return 0 for connected
-  //   Serial.println(mqtt.connectErrorString(ret));
-  //   Serial.println("Retrying MQTT connection in 5 seconds...");
-  //   mqtt.disconnect();
-  //   delay(500); // wait 5 seconds
-  //   retries--;
-  //   if (retries == 0)
-  //   {
-  //     // basically die and wait for WDT to reset me
-  //     //      while (1);
-  //   }
-  // }
-  // Serial.println("MQTT Connected!");
+  string buf = "";
+  buf.append(msg);
+  buf.append(value);
+  client.publish(mqqt_debug_topic, buf.c_str());
 }
 
-void mqttDebuglog(char *msg)
+void mqttDebugLog(string msg)
 {
-  client.publish(mqqt_debug_topic, msg);
+  client.publish(mqqt_debug_topic, msg.c_str());
 }
