@@ -9,6 +9,8 @@
 #include <string>
 #include <iostream>
 #include <thermistor.h>
+#include <AsyncTimer.h>
+
 using namespace std;
 
 /**
@@ -37,16 +39,7 @@ using namespace std;
 int BUILTIN_LED_PIN = 2;
 int COOLING_RELAY_PIN = 14;
 int FAN_RELAY_PIN = 16;
-int LIGHT_RELAY_PIN = 15; // TODO
-
-float wantedTemp = 8;
-float wantedTempRange = 3;
-
-float extraDegreesForFan = 0.4; // offtemp+extraDegreesForFan*2 should always be smaller than onTemp
-boolean ON_STATE = 1;
-boolean COOLING_ON_STATE = 0;
-float onTemp = 9;
-boolean coolingOn = false;
+int LIGHT_RELAY_PIN = 12;
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -54,7 +47,7 @@ DHT dht(DHTPIN, DHTTYPE);
 WiFiClient wifiClient;
 PubSubClient client(wifiClient);
 Thermistor *thermistor;
-char msg[MSG_BUFFER_SIZE];
+AsyncTimer timer;
 
 #define feedPrefix "feeds/fridge/"
 #define concat(first, second) first second
@@ -71,9 +64,11 @@ constexpr char *mqtt_fan_state_topic = concat(feedPrefix, "state/fan");
 constexpr char *mqtt_light_state_topic = concat(feedPrefix, "state/light");
 
 constexpr char *mqtt_toggle_compressor_topic = concat(feedPrefix, "toggle/compressor");
+constexpr char *mqtt_toggle_killswitch_topic = concat(feedPrefix, "toggle/killswitch");
 constexpr char *mqtt_toggle_fan_topic = concat(feedPrefix, "toggle/fan");
 constexpr char *mqtt_toggle_light_topic = concat(feedPrefix, "toggle/light");
 
+constexpr char *mqtt_enable_killswitch_topic = concat(feedPrefix, "enable/killswitch");
 constexpr char *mqtt_set_temp_topic = concat(feedPrefix, "set/temp");
 constexpr char *mqtt_set_temp_range_topic = concat(feedPrefix, "set/temp_range");
 
@@ -130,9 +125,12 @@ void mqttReconnect();
 void setupGPIO();
 void mSetupSerial();
 void setupWifi();
+void reconnectWifi();
+void twoSecondsLoop();
 void setupOTA();
 void setupMQTT();
 void blink(int delayMillis, int times);
+void handleSafety();
 
 void mqttDebugLog(const char *msg, const char *value);
 void mqttDebugLog(string msg);
@@ -143,68 +141,135 @@ public:
   float applianceTemp;
   float compressorTemp;
   float dht22Temp;
-  float wantedTemp = 8;
+  float wantedTemp = 7.5;
   float wantedTempRange = 3;
+  float extraDegreesForFan = 0.4;
   boolean compressorState = 0;
   boolean fanState = 0;
   boolean lightState = 0;
   boolean coolingMode = 0;
-  boolean killSwitchOn = 0;
+  boolean killswitchState = 0;
   boolean forceFanOn = 0;
   boolean forceOn = 0;
 
-  unsigned long lastCompressorStateChange;
-  unsigned long lastLightStateChange;
-  unsigned long lastFanStateChange;
+  unsigned long lastCompressorStateChange = 0;
+  unsigned long lastKillswitchStateChange = 0;
+  unsigned long lastLightStateChange = 0;
+  unsigned long lastFanStateChange = 0;
   boolean on()
   {
-    return !this->killSwitchOn;
+    return !this->killswitchState;
   }
   void updateTemps()
   {
     this->applianceTemp = readApplianceTemp();
+    Serial.print("this->applianceTemp: ");
+    Serial.println(this->applianceTemp);
     this->compressorTemp = readCompressorTemp();
+    Serial.print("this->compressorTemp: ");
+    Serial.println(this->compressorTemp);
     this->dht22Temp = dht.readTemperature(false);
+    Serial.print("this->dht22Temp: ");
+    Serial.println(this->dht22Temp);
   }
   void publishState()
   {
-    mqttPublishFloat(mqtt_appliance_temp_topic, this->applianceTemp);
+    mqttPublishFloat(mqtt_appliance_temp_topic, this->dht22Temp);
     mqttPublishFloat(mqtt_appliance_temp_topic_legacy, this->dht22Temp);
     mqttPublishFloat(mqtt_compressor_temp_topic, this->compressorTemp);
     // TODO publish other data
   }
+  void setKillswitch(boolean newState)
+  {
+    if (this->killswitchState != newState)
+    {
+      this->lastKillswitchStateChange = millis();
+      this->killswitchState = newState;
+      this->setCompressor(false);
+      this->setFan(false);
+      this->setLight(false);
+      mqttDebugLog("Killswitch to: ", this->killswitchState ? "ON" : "OFF");
+    }
+  }
+  void toggleKillswitch()
+  {
+    this->setKillswitch(!this->killswitchState);
+  }
+  void setCompressor(boolean newState)
+  {
+    if (this->compressorState != newState)
+    {
+      this->lastCompressorStateChange = millis();
+      this->compressorState = newState;
+      digitalWrite(COOLING_RELAY_PIN, this->compressorState);
+      mqttDebugLog("compressor relay changed to: ", this->compressorState ? "ON" : "OFF");
+    }
+  }
   void toggleCompressor()
   {
-    this->lastCompressorStateChange = millis();
-    this->compressorState = !this->compressorState;
-    digitalWrite(COOLING_RELAY_PIN, this->compressorState);
+    this->setCompressor(!this->compressorState);
+  }
+  void setFan(boolean newState)
+  {
+    if (this->fanState != newState)
+    {
+      this->lastFanStateChange = millis();
+      this->fanState = newState;
+      digitalWrite(FAN_RELAY_PIN, this->fanState);
+      mqttDebugLog("fan relay changed to: ", this->fanState ? "ON" : "OFF");
+    }
   }
   void toggleFan()
   {
-    this->lastFanStateChange = millis();
-    this->fanState = !this->fanState;
-    digitalWrite(FAN_RELAY_PIN, this->fanState);
+    this->setFan(!this->fanState);
+  }
+  void setLight(boolean newState)
+  {
+    if (this->lightState != newState)
+    {
+      this->lastLightStateChange = millis();
+      this->lightState = newState;
+      digitalWrite(LIGHT_RELAY_PIN, this->lightState);
+      mqttDebugLog("light relay changed to: ", this->lightState ? "ON" : "OFF");
+    }
   }
   void toggleLight()
   {
-    this->lastLightStateChange = millis();
-    this->lightState = !this->lightState;
-    digitalWrite(LIGHT_RELAY_PIN, this->lightState);
-    mqttDebugLog(((string) "light relay changed") + ((string)(this->lightState ? "0" : "1")));
+    this->setLight(!this->lightState);
   }
   void setTemp(float wantedTemp)
   {
     this->wantedTemp = wantedTemp;
+    mqttDebugLog("changed wanted temp to: ", to_string(wantedTemp).c_str());
   }
   void setTempRange(float wantedTempRange)
   {
     this->wantedTempRange = wantedTempRange;
+    mqttDebugLog("changed wanted temp range to: ", to_string(wantedTempRange).c_str());
   }
 };
 
 void handleMQTT(FridgeState *state);
 void handleAutoCooling(FridgeState *state);
 FridgeState fridgeState = FridgeState();
+void setupTimer()
+{
+  timer.setInterval([]()
+                    {
+    if (!fridgeState.coolingMode) {
+      fridgeState.setFan(HIGH);
+
+      timer.setTimeout([ = ]() {
+        if (!fridgeState.coolingMode) {
+          fridgeState.setFan(LOW);
+        }
+      }, 20 * 1000);
+    } },
+                    5 * 60 * 1000);
+  timer.setInterval([]()
+                    { twoSecondsLoop(); },
+                    2 * 1000);
+}
 void setup(void)
 {
   setupGPIO();
@@ -215,6 +280,7 @@ void setup(void)
   setupThermistor();
   dht.begin();
   mqttDebugLog("dht.begin done");
+  setupTimer();
   blink(400, 1);
 }
 
@@ -223,10 +289,8 @@ void loop(void)
   ArduinoOTA.handle();
   fridgeState.updateTemps();
   handleMQTT(&fridgeState);
-  if (fridgeState.on())
-  {
-    handleAutoCooling(&fridgeState);
-  }
+  handleSafety();
+  timer.handle();
 }
 
 void blink(int delayMillis, int times)
@@ -239,46 +303,7 @@ void blink(int delayMillis, int times)
     delay(delayMillis);
   }
 }
-void disableCooling()
-{
-  digitalWrite(COOLING_RELAY_PIN, LOW);
-}
 
-void handleAutoCooling(FridgeState *state)
-{
-  float temp = state->dht22Temp;
-  if (isnan(temp))
-  {
-    disableCooling();
-    blink(400, 2);
-  }
-  float lowTemp = wantedTemp - (wantedTempRange / 2);
-  float highTemp = wantedTemp + (wantedTempRange / 2);
-
-  if (temp < lowTemp)
-  {
-    digitalWrite(COOLING_RELAY_PIN, LOW);
-    coolingOn = false;
-  }
-  else if (temp > highTemp)
-  {
-    digitalWrite(COOLING_RELAY_PIN, HIGH);
-    coolingOn = true;
-    digitalWrite(FAN_RELAY_PIN, HIGH); // To Be extra sure
-  }
-  if (temp > highTemp - extraDegreesForFan)
-  {
-    digitalWrite(FAN_RELAY_PIN, HIGH);
-    coolingOn = true;
-  }
-  else if (temp > lowTemp + extraDegreesForFan)
-  {
-    if (!coolingOn)
-    {
-      digitalWrite(FAN_RELAY_PIN, LOW);
-    }
-  }
-}
 void handleMQTT(FridgeState *state)
 {
   if (!client.connected())
@@ -286,7 +311,6 @@ void handleMQTT(FridgeState *state)
     mqttReconnect();
   }
   client.loop();
-  state->publishState();
 }
 
 void mSetupSerial()
@@ -301,10 +325,12 @@ void setupGPIO()
   pinMode(BUILTIN_LED_PIN, OUTPUT);
   pinMode(COOLING_RELAY_PIN, OUTPUT);
   pinMode(FAN_RELAY_PIN, OUTPUT);
+  pinMode(LIGHT_RELAY_PIN, OUTPUT);
 
   digitalWrite(BUILTIN_LED_PIN, LOW);
   digitalWrite(FAN_RELAY_PIN, LOW);
   digitalWrite(COOLING_RELAY_PIN, LOW);
+  digitalWrite(LIGHT_RELAY_PIN, LOW);
 }
 
 void setupWifi()
@@ -318,6 +344,18 @@ void setupWifi()
     blink(500, 4);
     digitalWrite(COOLING_RELAY_PIN, LOW);
     return;
+  }
+}
+
+void reconnectWifi()
+{
+  // if WiFi is down, try reconnecting
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.print(millis());
+    Serial.println("Reconnecting to WiFi...");
+    WiFi.disconnect();
+    WiFi.reconnect();
   }
 }
 
@@ -346,13 +384,13 @@ void setupThermistor()
   float MAX_V_OVER_THERMISTOR = 1.65;
   float MAX_IN_VOLTAGE = 1;
   float MAX_RETURN_VAL = 1023;
-  int SERIES_RESISTANCE = 120 * 1000; // 100K in series with 20K:20K voltage divider
-  int REF_RESISTANCE = 25 * 1000;     // 25K measured when fridge was around 7 degrees
+  int SERIES_RESISTANCE = 66 * 1000; // 44K in series with 22K:22K voltage divider
+  int REF_RESISTANCE = 25 * 1000;    // 25K measured when fridge was around 7 degrees
   int REF_TEMP = 6;
   int B_COEF = 3950;
   int NB_SAMPLES_FOR_AVG = 1;
   int SAMPLE_DELAY = 200;
-  // Circuit diagram: https://www.falstad.com/circuit/circuitjs.html?ctz=CQAgjCAMB0l3BWK0BMkDMkBskAskBOLLdXAdlwA50RiQkFJ6BTAWjDACgA3cHcXLhC50KAUKZN8IdNBqTkCTgCcZ6LCBSVKw0Zu1RN8SJ3SNNCDVp1h+1w2GMycSVmiaNJqXChzH-cEIAKswAtgAOzMoAhgAuAK7KzJwA7rpi9iJiYIJQKhZWBujq+jpMjsac4WqFOsUa6jaGJtW2TPZtzk2SqXztBp05EvmDufWlhu5wVQUTKJZd4M2cQA
+  // Circuit diagram: https://www.falstad.com/circuit/circuitjs.html?ctz=CQAgjCAMB0l3BWK0BMkDMkBskAskBOLLdXAdlwA50RiQkFJ6BTAWjDACgA3cHcXLhC50KAUKZN8IdNBqTkCTgCcZ6LCBSVKw0Zu1RNaOJ3SNNCDVp1h+1w2HhN1kJK2P04yFFhRCAKswAtgAOzMoAhgAuAK7KzJwA7rpi9iJiYIJQKhZWBujq+jpS+CYhank6BRrqNoaQnOW2TPbNMlh1kkl8LQZtmRI5-VnVRYYoxg3lKJZjMzUd4PWcQA
   thermistor = new Thermistor(A0, MAX_V_OVER_THERMISTOR, MAX_IN_VOLTAGE, MAX_RETURN_VAL, SERIES_RESISTANCE, REF_RESISTANCE, REF_TEMP, B_COEF, NB_SAMPLES_FOR_AVG, SAMPLE_DELAY);
 }
 constexpr unsigned int mhash(const char *s, int off = 0)
@@ -360,35 +398,50 @@ constexpr unsigned int mhash(const char *s, int off = 0)
   return !s[off] ? 5381 : (mhash(s, off + 1) * 33) ^ s[off];
 }
 
-void mqttCallback(char *topic, unsigned char *payload, unsigned int length)
+void mqttCallback(char *topic, uint8_t *payload, unsigned int length)
 {
+  string topicString = string(topic);
   string debugMsg("received: ");
   debugMsg.append(topic);
   debugMsg.append(": ");
-  for (unsigned int i = 0; i < length; i++)
-  {
-    debugMsg.append((const char *)payload[i]);
-  }
-  string payloadString = (char *)payload;
+
+  string payloadString((char *)payload, length);
+  string payloadStringCopy = payloadString;
+  debugMsg.append(payloadStringCopy);
   mqttDebugLog(debugMsg);
-  switch (mhash(topic))
+
+  if (topicString.compare(string(mqtt_toggle_killswitch_topic)) == 0)
   {
-  case mhash(mqtt_toggle_compressor_topic):
+    fridgeState.toggleKillswitch();
+  }
+  else if (topicString.compare(string(mqtt_toggle_compressor_topic)) == 0)
+  {
     fridgeState.toggleCompressor();
-    break;
-  case mhash(mqtt_toggle_fan_topic):
+  }
+  else if (topicString.compare(string(mqtt_toggle_fan_topic)) == 0)
+  {
     fridgeState.toggleFan();
-    break;
-  case mhash(mqtt_toggle_light_topic):
+  }
+  else if (topicString.compare(string(mqtt_toggle_light_topic)) == 0)
+  {
     fridgeState.toggleLight();
-    break;
-  case mhash(mqtt_set_temp_range_topic):
-    fridgeState.setTempRange(stof(payloadString));
-    break;
-  case mhash(mqtt_set_temp_topic):
-    fridgeState.setTemp(stof(payloadString));
-    break;
-  default:
+  }
+  else if (topicString.compare(string(mqtt_set_temp_range_topic)) == 0)
+  {
+    float wantedTempRange = stof(payloadString);
+    fridgeState.setTempRange(wantedTempRange);
+  }
+  else if (topicString.compare(string(mqtt_set_temp_topic)) == 0)
+  {
+    float wantedTemp = stof(payloadString);
+    fridgeState.setTemp(wantedTemp);
+  }
+  else if (topicString.compare(string(mqtt_enable_killswitch_topic)) == 0)
+  {
+    fridgeState.setKillswitch(true);
+  }
+  else
+  {
     mqttDebugLog("Last MQTT Topic not recognized");
   }
 }
@@ -423,6 +476,8 @@ void mqttReconnect()
       client.subscribe(mqtt_toggle_light_topic);
       client.subscribe(mqtt_set_temp_range_topic);
       client.subscribe(mqtt_set_temp_topic);
+      client.subscribe(mqtt_enable_killswitch_topic);
+      client.subscribe(mqtt_toggle_killswitch_topic);
     }
     else
     {
@@ -434,15 +489,70 @@ void mqttReconnect()
     }
   }
 }
+
+void handleSafety()
+{
+  if (fridgeState.compressorTemp > 50)
+  {
+    fridgeState.setKillswitch(true);
+    mqttDebugLog("ERROR: Compressor temp above 50 measured!! KILLING");
+  }
+  unsigned long minutesTurnedOn = (millis() - fridgeState.lastCompressorStateChange) / (1000 * 60);
+  if (fridgeState.compressorState && minutesTurnedOn > 60 && minutesTurnedOn < 2 * 60) // We use minutesTurnedOn < 2 * 60 for when time would wrap around.
+  {
+    fridgeState.setKillswitch(true);
+    mqttDebugLog("ERROR: Compressor has been on for 1 hour straight!! KILLING");
+  }
+}
 void mqttDebugLog(const char *msg, const char *value = "")
 {
   string buf = "";
   buf.append(msg);
   buf.append(value);
-  client.publish(mqqt_debug_topic, buf.c_str());
+  mqttDebugLog(buf);
 }
 
 void mqttDebugLog(string msg)
 {
+  Serial.println(msg.c_str());
   client.publish(mqqt_debug_topic, msg.c_str());
+}
+
+void twoSecondsLoop()
+{
+  fridgeState.publishState();
+  float temp = fridgeState.dht22Temp;
+  if (!fridgeState.on() || isnan(temp))
+  {
+    fridgeState.setCompressor(LOW);
+    fridgeState.setFan(LOW);
+    fridgeState.coolingMode = false;
+    return;
+  }
+  float lowTemp = fridgeState.wantedTemp - (fridgeState.wantedTempRange / 2);
+  float highTemp = fridgeState.wantedTemp + (fridgeState.wantedTempRange / 2);
+
+  if (temp < lowTemp)
+  {
+    fridgeState.setCompressor(LOW);
+    timer.setTimeout([=]()
+                     {
+        if (!fridgeState.coolingMode) {
+          fridgeState.setFan(LOW);
+        } },
+                     60000);
+
+    fridgeState.coolingMode = false;
+  }
+  else if (temp > highTemp)
+  {
+    fridgeState.setCompressor(HIGH);
+    fridgeState.coolingMode = true;
+    fridgeState.setFan(HIGH); // To Be extra sure
+  }
+  if (temp > highTemp - fridgeState.extraDegreesForFan)
+  {
+    fridgeState.setFan(HIGH);
+    fridgeState.coolingMode = true;
+  }
 }
