@@ -185,9 +185,9 @@ public:
     {
       this->lastKillswitchStateChange = millis();
       this->killswitchState = newState;
-      this->setCompressor(false);
-      this->setFan(false);
-      this->setLight(false);
+      this->setCompressor(LOW);
+      this->setFan(LOW);
+      this->setLight(LOW);
       mqttDebugLog("Killswitch to: ", this->killswitchState ? "ON" : "OFF");
     }
   }
