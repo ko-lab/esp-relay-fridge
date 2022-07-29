@@ -256,7 +256,7 @@ void setupTimer()
 {
   timer.setInterval([]()
                     {
-    if (!fridgeState.coolingMode) {
+    if (fridgeState.on() &&!fridgeState.coolingMode) {
       fridgeState.setFan(HIGH);
 
       timer.setTimeout([ = ]() {
