@@ -11,6 +11,22 @@
 #include <thermistor.h>
 using namespace std;
 
+/**
+ * Create a file ".env" in the project root and put the credentials in.
+ * Do not commit the .env file to git.
+ *
+ * $ cat .env
+ * KOLAB_SSID=ko-lab-iot
+ * KOLAB_PASSWORD=password
+ */
+#ifndef KOLAB_SSID
+#define KOLAB_SSID "ko-lab-iot"
+#endif
+
+#ifndef KOLAB_PASSWORD
+#define KOLAB_PASSWORD "changeme"
+#endif
+
 #define DHTPIN 5
 #define DHTTYPE DHT22
 
@@ -40,9 +56,6 @@ PubSubClient client(wifiClient);
 Thermistor *thermistor;
 char msg[MSG_BUFFER_SIZE];
 
-// Replace with your network credentials
-const char *ssid = "ko-lab-iot";
-const char *password = "PASSWORD";
 #define feedPrefix "feeds/fridge/"
 #define concat(first, second) first second
 
@@ -297,7 +310,7 @@ void setupGPIO()
 void setupWifi()
 {
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
+  WiFi.begin(KOLAB_SSID, KOLAB_PASSWORD);
 
   if (WiFi.waitForConnectResult() != WL_CONNECTED)
   {
