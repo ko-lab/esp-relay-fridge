@@ -64,10 +64,10 @@ constexpr char *mqtt_fan_state_topic = concat(feedPrefix, "state/fan");
 constexpr char *mqtt_light_state_topic = concat(feedPrefix, "state/light");
 
 constexpr char *mqtt_toggle_compressor_topic = concat(feedPrefix, "toggle/compressor");
-constexpr char *mqtt_toggle_killswitch_topic = concat(feedPrefix, "toggle/killswitch");
 constexpr char *mqtt_toggle_fan_topic = concat(feedPrefix, "toggle/fan");
 constexpr char *mqtt_toggle_light_topic = concat(feedPrefix, "toggle/light");
 
+constexpr char *mqtt_disable_killswitch_topic = concat(feedPrefix, "disable/killswitch");
 constexpr char *mqtt_enable_killswitch_topic = concat(feedPrefix, "enable/killswitch");
 constexpr char *mqtt_set_temp_topic = concat(feedPrefix, "set/temp");
 constexpr char *mqtt_set_temp_range_topic = concat(feedPrefix, "set/temp_range");
@@ -181,13 +181,16 @@ public:
   }
   void setKillswitch(boolean newState)
   {
+    if (newState)
+    {
+      this->setCompressor(LOW);
+      this->setFan(LOW);
+      this->setLight(LOW);
+    }
     if (this->killswitchState != newState)
     {
       this->lastKillswitchStateChange = millis();
       this->killswitchState = newState;
-      this->setCompressor(LOW);
-      this->setFan(LOW);
-      this->setLight(LOW);
       mqttDebugLog("Killswitch to: ", this->killswitchState ? "ON" : "OFF");
     }
   }
@@ -256,15 +259,18 @@ void setupTimer()
 {
   timer.setInterval([]()
                     {
-    if (fridgeState.on() &&!fridgeState.coolingMode) {
-      fridgeState.setFan(HIGH);
+  if (!fridgeState.on() || fridgeState.coolingMode)
+  {
+    return;
+  }
+  fridgeState.setFan(HIGH);
 
-      timer.setTimeout([ = ]() {
+  timer.setTimeout([=]()
+                   {
         if (!fridgeState.coolingMode) {
           fridgeState.setFan(LOW);
-        }
-      }, 20 * 1000);
-    } },
+        } },
+                   20 * 1000); },
                     5 * 60 * 1000);
   timer.setInterval([]()
                     { twoSecondsLoop(); },
@@ -411,11 +417,7 @@ void mqttCallback(char *topic, uint8_t *payload, unsigned int length)
   debugMsg.append(payloadStringCopy);
   mqttDebugLog(debugMsg);
 
-  if (topicString.compare(string(mqtt_toggle_killswitch_topic)) == 0)
-  {
-    fridgeState.toggleKillswitch();
-  }
-  else if (topicString.compare(string(mqtt_toggle_compressor_topic)) == 0)
+  if (topicString.compare(string(mqtt_toggle_compressor_topic)) == 0)
   {
     fridgeState.toggleCompressor();
   }
@@ -436,6 +438,10 @@ void mqttCallback(char *topic, uint8_t *payload, unsigned int length)
   {
     float wantedTemp = stof(payloadString);
     fridgeState.setTemp(wantedTemp);
+  }
+  else if (topicString.compare(string(mqtt_disable_killswitch_topic)) == 0)
+  {
+    fridgeState.setKillswitch(false);
   }
   else if (topicString.compare(string(mqtt_enable_killswitch_topic)) == 0)
   {
@@ -478,7 +484,7 @@ void mqttReconnect()
       client.subscribe(mqtt_set_temp_range_topic);
       client.subscribe(mqtt_set_temp_topic);
       client.subscribe(mqtt_enable_killswitch_topic);
-      client.subscribe(mqtt_toggle_killswitch_topic);
+      client.subscribe(mqtt_disable_killswitch_topic);
     }
     else
     {
@@ -523,7 +529,11 @@ void twoSecondsLoop()
 {
   fridgeState.publishState();
   float temp = fridgeState.dht22Temp;
-  if (!fridgeState.on() || isnan(temp))
+  if (!fridgeState.on())
+  {
+    return;
+  }
+  if (isnan(temp))
   {
     fridgeState.setCompressor(LOW);
     fridgeState.setFan(LOW);
