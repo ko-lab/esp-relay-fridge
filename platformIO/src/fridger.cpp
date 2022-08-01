@@ -286,6 +286,7 @@ void setup(void)
 
 void loop(void)
 {
+  reconnectWifi();
   ArduinoOTA.handle();
   fridgeState.updateTemps();
   handleMQTT(&fridgeState);
