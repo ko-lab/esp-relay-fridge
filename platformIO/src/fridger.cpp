@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include "DHT.h"
-#include <ESP8266WiFi.h>
-#include <ESP8266mDNS.h>
+#include <WiFi.h>
+#include <mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
@@ -243,12 +243,12 @@ public:
   void setTemp(float wantedTemp)
   {
     this->wantedTemp = wantedTemp;
-    mqttDebugLog("changed wanted temp to: ", to_string(wantedTemp).c_str());
+    mqttDebugLog("changed wanted temp to: ", String(wantedTemp).c_str());
   }
   void setTempRange(float wantedTempRange)
   {
     this->wantedTempRange = wantedTempRange;
-    mqttDebugLog("changed wanted temp range to: ", to_string(wantedTempRange).c_str());
+    mqttDebugLog("changed wanted temp range to: ", String(wantedTempRange).c_str());
   }
 };
 
@@ -275,14 +275,17 @@ void setupTimer()
   timer.setInterval([]()
                     { twoSecondsLoop(); },
                     2 * 1000);
+  timer.setInterval([]()
+                    { if (!client.connected()){mqttReconnect();} },
+                    5 * 60 * 1000);
 }
 void setup(void)
 {
   setupGPIO();
   mSetupSerial();
   setupWifi();
-  setupMQTT();
   setupOTA();
+  setupMQTT();
   setupThermistor();
   dht.begin();
   mqttDebugLog("dht.begin done");
@@ -313,10 +316,6 @@ void blink(int delayMillis, int times)
 
 void handleMQTT(FridgeState *state)
 {
-  if (!client.connected())
-  {
-    mqttReconnect();
-  }
   client.loop();
 }
 
@@ -369,21 +368,21 @@ void reconnectWifi()
 void setupOTA()
 {
   ArduinoOTA.onStart([]()
-                     { Serial.println("Start"); });
+                     { Serial.println("ArduinoOTA Start"); });
   ArduinoOTA.onEnd([]()
-                   { Serial.println("\nEnd"); });
+                   { Serial.println("\nArduinoOTA End"); });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
-                        { Serial.printf("Progress: %u%%\r", (progress / (total / 100))); });
+                        { Serial.printf("ArduinoOTA Progress: %u%%\r", (progress / (total / 100))); });
   ArduinoOTA.onError([](ota_error_t error)
                      {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed"); });
+    Serial.printf("ArduinoOTA Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("ArduinoOTA Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("ArduinoOTA Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("ArduinoOTA Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("ArduinoOTA Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("ArduinoOTA End Failed"); });
   ArduinoOTA.begin();
-  mqttDebugLog("setupOTA done");
+  mqttDebugLog("ArduinoOTA setupOTA done");
 }
 
 void setupThermistor()
@@ -431,12 +430,12 @@ void mqttCallback(char *topic, uint8_t *payload, unsigned int length)
   }
   else if (topicString.compare(string(mqtt_set_temp_range_topic)) == 0)
   {
-    float wantedTempRange = stof(payloadString);
+    float wantedTempRange = String(payloadString.c_str()).toFloat();
     fridgeState.setTempRange(wantedTempRange);
   }
   else if (topicString.compare(string(mqtt_set_temp_topic)) == 0)
   {
-    float wantedTemp = stof(payloadString);
+    float wantedTemp = String(payloadString.c_str()).toFloat();
     fridgeState.setTemp(wantedTemp);
   }
   else if (topicString.compare(string(mqtt_disable_killswitch_topic)) == 0)
@@ -467,11 +466,11 @@ void mqttReconnect()
 {
   // Loop until we're reconnected (max 3 tries)
   int tries = 0;
-  while (!client.connected() && tries++ < 3)
+  while (!client.connected() && tries++ < 1)
   {
     Serial.print("Attempting MQTT connection...");
     // Create a random client ID
-    String clientId = "ESP8266Client-Fridge";
+    String clientId = "ESP32Client-Fridge";
     // Attempt to connect
     if (client.connect(clientId.c_str()))
     {
