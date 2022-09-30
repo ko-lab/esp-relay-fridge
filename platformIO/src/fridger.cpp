@@ -37,11 +37,11 @@ using namespace std;
 #define MSG_BUFFER_SIZE (50)
 
 int BUILTIN_LED_PIN = 13;
-int COOLING_RELAY_PIN = 1;
-int FAN_RELAY_PIN = 5;
-int LIGHT_RELAY_PIN = 9;
+int COOLING_RELAY_PIN = 33;
+int FAN_RELAY_PIN = 32;
+int LIGHT_RELAY_PIN = 25;
 int APPLIANCE_THERMISTOR_PIN = 4;
-int COMPRESSOR_THERMISTOR_PIN = 33;
+int COMPRESSOR_THERMISTOR_PIN = 35;
 DHT dht(DHTPIN, DHTTYPE);
 
 // Create an ESP8266 WiFiClient class to connect to the MQTT server.
