@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include "DHT.h"
-#include <ESP8266WiFi.h>
-#include <ESP8266mDNS.h>
+#include <WiFi.h>
+#include <mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
@@ -29,24 +29,26 @@ using namespace std;
 #define KOLAB_PASSWORD "changeme"
 #endif
 
-#define DHTPIN 5
+#define DHTPIN 14
 #define DHTTYPE DHT22
 
 #define MQTT_SERVER "10.88.78.186"
 #define MQTT_SERVERPORT 1884
 #define MSG_BUFFER_SIZE (50)
 
-int BUILTIN_LED_PIN = 2;
-int COOLING_RELAY_PIN = 14;
-int FAN_RELAY_PIN = 16;
-int LIGHT_RELAY_PIN = 12;
-
+int BUILTIN_LED_PIN = 13;
+int COOLING_RELAY_PIN = 33;
+int FAN_RELAY_PIN = 32;
+int LIGHT_RELAY_PIN = 25;
+int APPLIANCE_THERMISTOR_PIN = 4;
+int COMPRESSOR_THERMISTOR_PIN = 35;
 DHT dht(DHTPIN, DHTTYPE);
 
 // Create an ESP8266 WiFiClient class to connect to the MQTT server.
 WiFiClient wifiClient;
 PubSubClient client(wifiClient);
-Thermistor *thermistor;
+Thermistor *applianceThermistor;
+Thermistor *compressorThermistor;
 AsyncTimer timer;
 
 #define feedPrefix "feeds/fridge/"
@@ -74,16 +76,16 @@ constexpr char *mqtt_set_temp_range_topic = concat(feedPrefix, "set/temp_range")
 
 // const int APPLIANCE_POWER_PIN = -1;           // TODO use 2 gpio pins for switching between different thermistor readings
 // const int[] ALL_PINS = [APPLIANCE_POWER_PIN]; // TODO use 2 gpio pins for switching between different thermistor readings
-float readApplianceTemp()
+float readApplianceThermistorTemp()
 {
   // TODO enable APPLIANCE_POWER_PIN and disable other pins https://forum.arduino.cc/t/nodemcu-1-analog-pin-multiple-thermistors-reading-problem/593407/7
-  return thermistor->readTempC();
+  return applianceThermistor->readTempC();
 }
 
 float readCompressorTemp()
 {
   // TODO enable COMPRESSOR_POWER_PIN and disable other pins https://forum.arduino.cc/t/nodemcu-1-analog-pin-multiple-thermistors-reading-problem/593407/7
-  return thermistor->readTempC();
+  return compressorThermistor->readTempC();
 }
 unsigned int longNbDigits(long number)
 {
@@ -134,7 +136,8 @@ void handleSafety();
 
 void mqttDebugLog(const char *msg, const char *value);
 void mqttDebugLog(string msg);
-void setupThermistor();
+void setupApplianceThermistor();
+void setupCompressorThermistor();
 class FridgeState
 {
 public:
@@ -162,15 +165,11 @@ public:
   }
   void updateTemps()
   {
-    this->applianceTemp = readApplianceTemp();
-    Serial.print("this->applianceTemp: ");
-    Serial.println(this->applianceTemp);
+#ifdef APPLIANCE_THERMISTOR_ENABLED
+    this->applianceTemp = readApplianceThermistorTemp();
+#endif
     this->compressorTemp = readCompressorTemp();
-    Serial.print("this->compressorTemp: ");
-    Serial.println(this->compressorTemp);
     this->dht22Temp = dht.readTemperature(false);
-    Serial.print("this->dht22Temp: ");
-    Serial.println(this->dht22Temp);
   }
   void publishState()
   {
@@ -243,12 +242,12 @@ public:
   void setTemp(float wantedTemp)
   {
     this->wantedTemp = wantedTemp;
-    mqttDebugLog("changed wanted temp to: ", to_string(wantedTemp).c_str());
+    mqttDebugLog("changed wanted temp to: ", String(wantedTemp).c_str());
   }
   void setTempRange(float wantedTempRange)
   {
     this->wantedTempRange = wantedTempRange;
-    mqttDebugLog("changed wanted temp range to: ", to_string(wantedTempRange).c_str());
+    mqttDebugLog("changed wanted temp range to: ", String(wantedTempRange).c_str());
   }
 };
 
@@ -275,15 +274,21 @@ void setupTimer()
   timer.setInterval([]()
                     { twoSecondsLoop(); },
                     2 * 1000);
+  timer.setInterval([]()
+                    { if (!client.connected()){mqttReconnect();} },
+                    5 * 60 * 1000);
 }
 void setup(void)
 {
   setupGPIO();
   mSetupSerial();
   setupWifi();
-  setupMQTT();
   setupOTA();
-  setupThermistor();
+  setupMQTT();
+#ifdef APPLIANCE_THERMISTOR_ENABLED
+  setupApplianceThermistor();
+#endif
+  setupCompressorThermistor();
   dht.begin();
   mqttDebugLog("dht.begin done");
   setupTimer();
@@ -313,10 +318,6 @@ void blink(int delayMillis, int times)
 
 void handleMQTT(FridgeState *state)
 {
-  if (!client.connected())
-  {
-    mqttReconnect();
-  }
   client.loop();
 }
 
@@ -369,37 +370,53 @@ void reconnectWifi()
 void setupOTA()
 {
   ArduinoOTA.onStart([]()
-                     { Serial.println("Start"); });
+                     { Serial.println("ArduinoOTA Start"); });
   ArduinoOTA.onEnd([]()
-                   { Serial.println("\nEnd"); });
+                   { Serial.println("\nArduinoOTA End"); });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
-                        { Serial.printf("Progress: %u%%\r", (progress / (total / 100))); });
+                        { Serial.printf("ArduinoOTA Progress: %u%%\r", (progress / (total / 100))); });
   ArduinoOTA.onError([](ota_error_t error)
                      {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed"); });
+    Serial.printf("ArduinoOTA Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("ArduinoOTA Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("ArduinoOTA Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("ArduinoOTA Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("ArduinoOTA Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("ArduinoOTA End Failed"); });
   ArduinoOTA.begin();
-  mqttDebugLog("setupOTA done");
+  mqttDebugLog("ArduinoOTA setupOTA done");
 }
 
-void setupThermistor()
+void setupApplianceThermistor()
 {
-  float MAX_V_OVER_THERMISTOR = 1.65;
-  float MAX_IN_VOLTAGE = 1;
+  float MAX_V_OVER_THERMISTOR = 3;
+  float MAX_IN_VOLTAGE = 3;
   float MAX_RETURN_VAL = 1023;
-  int SERIES_RESISTANCE = 66 * 1000; // 44K in series with 22K:22K voltage divider
+  int SERIES_RESISTANCE = 20 * 1000; // 20K resistor
   int REF_RESISTANCE = 25 * 1000;    // 25K measured when fridge was around 7 degrees
   int REF_TEMP = 6;
   int B_COEF = 3950;
   int NB_SAMPLES_FOR_AVG = 1;
   int SAMPLE_DELAY = 200;
   // Circuit diagram: https://www.falstad.com/circuit/circuitjs.html?ctz=CQAgjCAMB0l3BWK0BMkDMkBskAskBOLLdXAdlwA50RiQkFJ6BTAWjDACgA3cHcXLhC50KAUKZN8IdNBqTkCTgCcZ6LCBSVKw0Zu1RNaOJ3SNNCDVp1h+1w2HhN1kJK2P04yFFhRCAKswAtgAOzMoAhgAuAK7KzJwA7rpi9iJiYIJQKhZWBujq+jpS+CYhank6BRrqNoaQnOW2TPbNMlh1kkl8LQZtmRI5-VnVRYYoxg3lKJZjMzUd4PWcQA
-  thermistor = new Thermistor(A0, MAX_V_OVER_THERMISTOR, MAX_IN_VOLTAGE, MAX_RETURN_VAL, SERIES_RESISTANCE, REF_RESISTANCE, REF_TEMP, B_COEF, NB_SAMPLES_FOR_AVG, SAMPLE_DELAY);
+  applianceThermistor = new Thermistor(APPLIANCE_THERMISTOR_PIN, MAX_V_OVER_THERMISTOR, MAX_IN_VOLTAGE, MAX_RETURN_VAL, SERIES_RESISTANCE, REF_RESISTANCE, REF_TEMP, B_COEF, NB_SAMPLES_FOR_AVG, SAMPLE_DELAY);
 }
+
+void setupCompressorThermistor()
+{
+  float MAX_V_OVER_THERMISTOR = 3;
+  float MAX_IN_VOLTAGE = 3;
+  float MAX_RETURN_VAL = 1023;
+  int SERIES_RESISTANCE = 20 * 1000; // 20K resistor
+  int REF_RESISTANCE = 25 * 1000;    // 25K measured when fridge was around 7 degrees
+  int REF_TEMP = 6;
+  int B_COEF = 3950;
+  int NB_SAMPLES_FOR_AVG = 1;
+  int SAMPLE_DELAY = 200;
+  // Circuit diagram: https://www.falstad.com/circuit/circuitjs.html?ctz=CQAgjCAMB0l3BWK0BMkDMkBskAskBOLLdXAdlwA50RiQkFJ6BTAWjDACgA3cHcXLhC50KAUKZN8IdNBqTkCTgCcZ6LCBSVKw0Zu1RNaOJ3SNNCDVp1h+1w2HhN1kJK2P04yFFhRCAKswAtgAOzMoAhgAuAK7KzJwA7rpi9iJiYIJQKhZWBujq+jpS+CYhank6BRrqNoaQnOW2TPbNMlh1kkl8LQZtmRI5-VnVRYYoxg3lKJZjMzUd4PWcQA
+  compressorThermistor = new Thermistor(COMPRESSOR_THERMISTOR_PIN, MAX_V_OVER_THERMISTOR, MAX_IN_VOLTAGE, MAX_RETURN_VAL, SERIES_RESISTANCE, REF_RESISTANCE, REF_TEMP, B_COEF, NB_SAMPLES_FOR_AVG, SAMPLE_DELAY);
+}
+
 constexpr unsigned int mhash(const char *s, int off = 0)
 {
   return !s[off] ? 5381 : (mhash(s, off + 1) * 33) ^ s[off];
@@ -431,12 +448,12 @@ void mqttCallback(char *topic, uint8_t *payload, unsigned int length)
   }
   else if (topicString.compare(string(mqtt_set_temp_range_topic)) == 0)
   {
-    float wantedTempRange = stof(payloadString);
+    float wantedTempRange = String(payloadString.c_str()).toFloat();
     fridgeState.setTempRange(wantedTempRange);
   }
   else if (topicString.compare(string(mqtt_set_temp_topic)) == 0)
   {
-    float wantedTemp = stof(payloadString);
+    float wantedTemp = String(payloadString.c_str()).toFloat();
     fridgeState.setTemp(wantedTemp);
   }
   else if (topicString.compare(string(mqtt_disable_killswitch_topic)) == 0)
@@ -467,11 +484,11 @@ void mqttReconnect()
 {
   // Loop until we're reconnected (max 3 tries)
   int tries = 0;
-  while (!client.connected() && tries++ < 3)
+  while (!client.connected() && tries++ < 1)
   {
     Serial.print("Attempting MQTT connection...");
     // Create a random client ID
-    String clientId = "ESP8266Client-Fridge";
+    String clientId = "ESP32Client-Fridge";
     // Attempt to connect
     if (client.connect(clientId.c_str()))
     {
@@ -527,6 +544,12 @@ void mqttDebugLog(string msg)
 
 void twoSecondsLoop()
 {
+  Serial.print("fridgeState.applianceTemp: ");
+  Serial.println(fridgeState.applianceTemp);
+  Serial.print("fridgeState.compressorTemp: ");
+  Serial.println(fridgeState.compressorTemp);
+  Serial.print("fridgeState.dht22Temp: ");
+  Serial.println(fridgeState.dht22Temp);
   fridgeState.publishState();
   float temp = fridgeState.dht22Temp;
   if (!fridgeState.on())
